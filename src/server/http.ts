@@ -18,12 +18,14 @@ import { SkillStore, SkillStoreError } from "../skills/store.js";
 /** 启动仅监听本机的 Canvas Agent HTTP 服务。 */
 export function startHttpServer() {
     const config = loadConfig(true);
+    const codexEnabled = process.env.SUPDANCE_CANVAS_DISABLE_CODEX !== "1";
     const port = Number(process.env.PORT) || Number(new URL(config.url).port) || DEFAULT_PORT;
     config.url = `http://127.0.0.1:${port}`;
     saveConfig(config);
 
     const initialWorkspace = ensureSiteWorkspace(config);
-    const session = new CanvasSession(initialWorkspace.activeThreadId || "");
+    const activeThreadId = codexEnabled ? initialWorkspace.activeThreadId || "" : "";
+    const session = new CanvasSession(activeThreadId);
     const launchTickets = new Map<string, { mode: string; projectId: string; expiresAt: number }>();
     const eventTickets = new Map<string, { origin: string; clientId: string; expiresAt: number }>();
     const skillStore = new SkillStore(initialWorkspace.workspacePath);
@@ -39,7 +41,7 @@ export function startHttpServer() {
             if (value.type === "mcp.complete") session.completeConversationMcpInventory(mcpInventory(value.services));
         }
         const scope = session.codexBusy ? session.codexEventScope : { threadId: "", turnId: "", sourceClientId: "" };
-        const threadId = String(value.threadId || value.thread_id || scope.threadId || ensureSiteWorkspace(config).activeThreadId || "");
+        const threadId = String(value.threadId || value.thread_id || scope.threadId || (codexEnabled ? ensureSiteWorkspace(config).activeThreadId || "" : ""));
         const turnId = String(value.turnId || value.turn_id || scope.turnId || "");
         const sourceClientId = String(value.sourceClientId || scope.sourceClientId || "");
         const data = {
@@ -134,7 +136,7 @@ export function startHttpServer() {
         if (!grant || Date.now() > grant.expiresAt || grant.origin !== origin || grant.clientId !== clientId) {
             return void res.status(401).json({ ok: false, error: "invalid event ticket" });
         }
-        session.openEvents(requestUrl(req, config), res, ensureSiteWorkspace(config).activeThreadId || "");
+        session.openEvents(requestUrl(req, config), res, codexEnabled ? ensureSiteWorkspace(config).activeThreadId || "" : "");
     });
     app.get("/launch/:ticket", (req, res) => {
         const ticket = String(req.params.ticket || "");
@@ -489,7 +491,6 @@ export function startHttpServer() {
         console.log("Remove manually added MCP: codex mcp remove supdance-canvas");
         if (logger.enabled) console.log(`Debug log: ${logger.filePath}`);
         logger.info("Canvas Agent started", { url: config.url, workspace: ensureSiteWorkspace(config).workspacePath, debugLog: logger.filePath });
-        const activeThreadId = initialWorkspace.activeThreadId || "";
         if (activeThreadId && session.beginCodexMutation()) {
             void prepareExistingThread(activeThreadId).catch(async (error) => {
                 if (!isRecoverableThreadError(error)) return failPreparedConversation(error, activeThreadId);
