@@ -1,6 +1,6 @@
 {
   "name": "@supdance/canvas-agent",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "license": "MIT",
   "description": "Local MCP and browser bridge for SupDance Canvas",
   "repository": {
