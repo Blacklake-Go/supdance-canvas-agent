@@ -143,6 +143,43 @@ test("更新校验失败时不会提前改写 SKILL.md", async (context) => {
     assert.deepEqual(await store.get("safe-update"), created);
 });
 
+test("管理 Skill 附属资源并阻止路径穿越和过期覆盖", async (context) => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-skill-resource-"));
+    context.after(() => fs.rm(workspace, { recursive: true, force: true }));
+    const store = new SkillStore(workspace);
+    await store.create({ name: "resource-demo", description: "资源文件测试", instructions: "读取 references/guide.md 并按其中规范工作。" });
+
+    const created = await store.writeResource("resource-demo", "references/guide.md", "# 规范\n先阅读素材。\n");
+    assert.equal(created.path, "references/guide.md");
+    assert.equal(created.bytes, Buffer.byteLength(created.content, "utf8"));
+    assert.deepEqual((await store.listResources("resource-demo")).map(({ path: resourcePath }) => resourcePath), ["references/guide.md"]);
+    assert.deepEqual(await store.getResource("resource-demo", "references/guide.md"), created);
+
+    await assert.rejects(store.writeResource("resource-demo", "references/guide.md", "过期覆盖", "0".repeat(64)), (error: unknown) => error instanceof SkillStoreError && error.statusCode === 409);
+    const updated = await store.writeResource("resource-demo", "references/guide.md", "# 更新规范\n", created.revision);
+    assert.notEqual(updated.revision, created.revision);
+    await assert.rejects(store.writeResource("resource-demo", "../../outside.md", "越界"), (error: unknown) => error instanceof SkillStoreError && error.statusCode === 400);
+    await assert.rejects(store.writeResource("resource-demo", "SKILL.md", "覆盖主文档"), (error: unknown) => error instanceof SkillStoreError && error.statusCode === 400);
+
+    await store.deleteResource("resource-demo", "references/guide.md", updated.revision);
+    assert.deepEqual(await store.listResources("resource-demo"), []);
+});
+
+test("拒绝通过 Skill 资源符号链接读写工作区外文件", async (context) => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-skill-resource-link-"));
+    context.after(() => fs.rm(workspace, { recursive: true, force: true }));
+    const store = new SkillStore(workspace);
+    await store.create({ name: "linked-resource", description: "符号链接测试", instructions: "不跟随外部链接。" });
+    const skillDirectory = path.join(workspace, ".agents", "skills", "linked-resource");
+    const outsideFile = path.join(workspace, "outside.md");
+    await fs.writeFile(outsideFile, "保密内容", "utf8");
+    await fs.symlink(outsideFile, path.join(skillDirectory, "external.md"));
+
+    await assert.rejects(store.getResource("linked-resource", "external.md"), (error: unknown) => error instanceof SkillStoreError && error.statusCode === 400);
+    await assert.rejects(store.listResources("linked-resource"), (error: unknown) => error instanceof SkillStoreError && error.statusCode === 400);
+    assert.equal(await fs.readFile(outsideFile, "utf8"), "保密内容");
+});
+
 test("拒绝读取非对象格式的 openai.yaml", async (context) => {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-skill-store-"));
     context.after(() => fs.rm(workspace, { recursive: true, force: true }));

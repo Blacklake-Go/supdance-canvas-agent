@@ -12,6 +12,9 @@ const MAX_DISPLAY_NAME_LENGTH = 64;
 const MIN_SHORT_DESCRIPTION_LENGTH = 25;
 const MAX_SHORT_DESCRIPTION_LENGTH = 64;
 const MAX_DEFAULT_PROMPT_LENGTH = 1024;
+const MAX_RESOURCE_BYTES = 1024 * 1024;
+const MAX_RESOURCE_COUNT = 500;
+const MAX_RESOURCE_DEPTH = 8;
 
 export type ManagedSkillInterface = {
     displayName?: string;
@@ -42,6 +45,9 @@ export type UpdateManagedSkillInput = {
     interface?: ManagedSkillInterface | null;
     expectedRevision: string;
 };
+
+export type ManagedSkillResource = { path: string; bytes: number; revision: string };
+export type ManagedSkillResourceDetail = ManagedSkillResource & { content: string };
 
 type SkillDocument = {
     raw: string;
@@ -87,6 +93,68 @@ export class SkillStore {
         } catch (error) {
             throw storeError(error, "读取 Skill 失败");
         }
+    }
+
+    async listResources(nameValue: string): Promise<ManagedSkillResource[]> {
+        try {
+            await this.writeQueue.catch(() => undefined);
+            const { skillDir } = await this.safeExistingPaths(nameValue);
+            const resources: ManagedSkillResource[] = [];
+            await collectResources(skillDir, skillDir, resources, 0);
+            return resources.sort((a, b) => a.path.localeCompare(b.path));
+        } catch (error) {
+            throw storeError(error, "读取 Skill 资源失败");
+        }
+    }
+
+    async getResource(nameValue: string, resourcePathValue: string): Promise<ManagedSkillResourceDetail> {
+        try {
+            await this.writeQueue.catch(() => undefined);
+            const { skillDir } = await this.safeExistingPaths(nameValue);
+            const { absolutePath, relativePath } = await resolveResourcePath(skillDir, resourcePathValue, false);
+            const entry = await lstatOptional(absolutePath);
+            if (!entry) throw new SkillStoreError("找不到 Skill 资源文件", 404);
+            if (entry.isSymbolicLink() || !entry.isFile()) throw new SkillStoreError("Skill 资源路径不安全", 400);
+            if (entry.size > MAX_RESOURCE_BYTES) throw new SkillStoreError("Skill 资源文件不能超过 1MiB", 409);
+            const content = await readResourceText(absolutePath);
+            return { path: relativePath, content, bytes: Buffer.byteLength(content, "utf8"), revision: resourceRevision(content) };
+        } catch (error) {
+            throw storeError(error, "读取 Skill 资源失败");
+        }
+    }
+
+    writeResource(nameValue: string, resourcePathValue: string, contentValue: unknown, expectedRevisionValueInput?: unknown) {
+        return this.mutate(async () => {
+            const { skillDir } = await this.safeExistingPaths(nameValue);
+            const content = resourceContent(contentValue);
+            const { absolutePath, relativePath } = await resolveResourcePath(skillDir, resourcePathValue, true);
+            const existing = await lstatOptional(absolutePath);
+            const expectedRevision = expectedRevisionValueInput === undefined || expectedRevisionValueInput === null ? "" : resourceExpectedRevision(expectedRevisionValueInput);
+            if (existing?.isSymbolicLink() || (existing && !existing.isFile())) throw new SkillStoreError("Skill 资源路径不安全", 400);
+            if (existing && !expectedRevision) throw new SkillStoreError("同名 Skill 资源已存在", 409);
+            if (!existing && expectedRevision) throw new SkillStoreError("Skill 资源已被删除，请刷新后重试", 409);
+            if (existing) {
+                const current = await readResourceText(absolutePath);
+                assertRevision(expectedRevision, resourceRevision(current));
+            }
+            await writeFileAtomic(absolutePath, content);
+            return { path: relativePath, content, bytes: Buffer.byteLength(content, "utf8"), revision: resourceRevision(content) } satisfies ManagedSkillResourceDetail;
+        });
+    }
+
+    deleteResource(nameValue: string, resourcePathValue: string, expectedRevisionValueInput: unknown) {
+        return this.mutate(async () => {
+            const { skillDir } = await this.safeExistingPaths(nameValue);
+            const expectedRevision = resourceExpectedRevision(expectedRevisionValueInput);
+            const { absolutePath } = await resolveResourcePath(skillDir, resourcePathValue, false);
+            const entry = await lstatOptional(absolutePath);
+            if (!entry) throw new SkillStoreError("找不到 Skill 资源文件", 404);
+            if (entry.isSymbolicLink() || !entry.isFile()) throw new SkillStoreError("Skill 资源路径不安全", 400);
+            if (entry.size > MAX_RESOURCE_BYTES) throw new SkillStoreError("Skill 资源文件不能超过 1MiB", 409);
+            const current = await readResourceText(absolutePath);
+            assertRevision(expectedRevision, resourceRevision(current));
+            await fs.unlink(absolutePath);
+        });
     }
 
     /** 创建新的画布专属 Skill。 */
@@ -391,6 +459,81 @@ async function writeFileAtomic(filePath: string, content: string) {
 
 function revision(skillRaw: string, openAiRaw: string) {
     return crypto.createHash("sha256").update(skillRaw).update("\0").update(openAiRaw).digest("hex");
+}
+
+function resourceRevision(content: string) {
+    return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+function resourceContent(value: unknown) {
+    if (typeof value !== "string") throw new SkillStoreError("Skill 资源内容无效", 400);
+    if (Buffer.byteLength(value, "utf8") > MAX_RESOURCE_BYTES) throw new SkillStoreError("Skill 资源文件不能超过 1MiB", 400);
+    return value;
+}
+
+function resourceExpectedRevision(value: unknown) {
+    const expected = typeof value === "string" ? value : "";
+    if (!/^[a-f0-9]{64}$/.test(expected)) throw new SkillStoreError("Skill 资源版本无效，请重新加载后再试", 400);
+    return expected;
+}
+
+async function resolveResourcePath(skillDir: string, pathValue: string, createParents: boolean) {
+    if (typeof pathValue !== "string" || !pathValue || pathValue.length > 512 || pathValue.includes("\\") || pathValue.includes("\0") || pathValue.startsWith("/")) {
+        throw new SkillStoreError("Skill 资源路径无效", 400);
+    }
+    const segments = pathValue.split("/");
+    if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.startsWith(".") || segment.trim() !== segment || /[<>:"|?*]/.test(segment))) {
+        throw new SkillStoreError("Skill 资源路径无效", 400);
+    }
+    if (segments[0].toLowerCase() === "agents" || (segments.length === 1 && segments[0].toLowerCase() === "skill.md")) {
+        throw new SkillStoreError("该路径由 Skill 管理器保留", 400);
+    }
+    const relativePath = segments.join("/");
+    let current = skillDir;
+    for (const segment of segments.slice(0, -1)) {
+        current = path.join(current, segment);
+        const entry = await lstatOptional(current);
+        if (!entry) {
+            if (!createParents) throw new SkillStoreError("找不到 Skill 资源文件", 404);
+            await fs.mkdir(current);
+            continue;
+        }
+        if (entry.isSymbolicLink() || !entry.isDirectory()) throw new SkillStoreError("Skill 资源路径不安全", 400);
+    }
+    return { absolutePath: path.join(current, segments[segments.length - 1]), relativePath };
+}
+
+async function collectResources(root: string, directory: string, result: ManagedSkillResource[], depth: number): Promise<void> {
+    if (depth > MAX_RESOURCE_DEPTH) throw new SkillStoreError(`Skill 资源目录最多嵌套 ${MAX_RESOURCE_DEPTH} 层`, 409);
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+        const absolutePath = path.join(directory, entry.name);
+        const relativePath = path.relative(root, absolutePath).split(path.sep).join("/");
+        if (relativePath === "SKILL.md" || relativePath === "agents" || relativePath.startsWith("agents/")) continue;
+        const metadata = await fs.lstat(absolutePath);
+        if (metadata.isSymbolicLink()) throw new SkillStoreError("Skill 资源目录中存在符号链接，无法安全读取", 400);
+        if (metadata.isDirectory()) {
+            await collectResources(root, absolutePath, result, depth + 1);
+            continue;
+        }
+        if (!metadata.isFile()) continue;
+        if (metadata.size > MAX_RESOURCE_BYTES) throw new SkillStoreError(`Skill 资源文件超过 1MiB：${relativePath}`, 409);
+        let content: string;
+        try {
+            content = await readResourceText(absolutePath);
+        } catch {
+            continue;
+        }
+        result.push({ path: relativePath, bytes: metadata.size, revision: resourceRevision(content) });
+        if (result.length > MAX_RESOURCE_COUNT) throw new SkillStoreError(`单个 Skill 最多管理 ${MAX_RESOURCE_COUNT} 个资源文件`, 409);
+    }
+}
+
+async function readResourceText(filePath: string) {
+    try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(await fs.readFile(filePath));
+    } catch {
+        throw new SkillStoreError("Skill 资源不是有效的 UTF-8 文本文件", 409);
+    }
 }
 
 async function ensurePlainDirectory(directory: string) {

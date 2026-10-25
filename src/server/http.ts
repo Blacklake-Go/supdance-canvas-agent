@@ -266,6 +266,23 @@ export function startHttpServer() {
     app.get("/agent/codex/skills/:name", route(async (req, res) => {
         res.json({ ok: true, data: await skillStore.get(routeParam(req.params.name)) });
     }));
+    app.get("/agent/codex/skills/:name/resources", route(async (req, res) => {
+        const name = routeParam(req.params.name);
+        const resourcePath = typeof req.query.path === "string" ? req.query.path : "";
+        if (!resourcePath) return res.json({ ok: true, data: await skillStore.listResources(name) });
+        res.json({ ok: true, data: await skillStore.getResource(name, resourcePath) });
+    }));
+    app.post("/agent/codex/skills/:name/resources", codexMutation(async (req, res) => {
+        const name = routeParam(req.params.name);
+        const data = await skillStore.writeResource(name, req.body?.path, req.body?.content, req.body?.expectedRevision);
+        session.emitAll("skills_changed", { forceReload: true });
+        res.status(req.body?.expectedRevision ? 200 : 201).json({ ok: true, data });
+    }));
+    app.post("/agent/codex/skills/:name/resources/delete", codexMutation(async (req, res) => {
+        await skillStore.deleteResource(routeParam(req.params.name), req.body?.path, req.body?.expectedRevision);
+        session.emitAll("skills_changed", { forceReload: true });
+        res.json({ ok: true });
+    }));
     app.post("/agent/codex/skills", codexMutation(async (req, res) => {
         const data = await skillStore.create(req.body);
         session.emitAll("skills_changed", { forceReload: true });
