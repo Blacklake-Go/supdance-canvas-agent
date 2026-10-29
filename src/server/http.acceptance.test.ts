@@ -30,9 +30,12 @@ test("local Agent identity and one-use SSE tickets enforce version, origin, and 
         path.join(packageRoot, "src/index.ts"),
     ], {
         cwd: packageRoot,
-        env: { ...process.env, HOME: home, USERPROFILE: home, PORT: String(port) },
-        stdio: "ignore",
+        env: { ...process.env, SUPDANCE_CANVAS_CONFIG_DIR: configDir, PORT: String(port), NODE_ENV: "test", SUPDANCE_CANVAS_DISABLE_CODEX: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
     });
+    let output = "";
+    child.stdout?.on("data", chunk => { output += chunk.toString(); });
+    child.stderr?.on("data", chunk => { output += chunk.toString(); });
     t.after(async () => {
         await stop(child);
         fs.rmSync(home, { recursive: true, force: true });
@@ -42,6 +45,7 @@ test("local Agent identity and one-use SSE tickets enforce version, origin, and 
     assert.equal(identity.service, "supdance-canvas-agent");
     assert.equal(identity.agentVersion, VERSION);
     assert.equal(identity.protocolVersion, 6);
+    assert.doesNotMatch(output, /acceptance-only-agent-token|Connect token:/);
 
     const queryTokenResponse = await fetch(`${baseUrl}/identity?token=acceptance-only-agent-token`);
     assert.equal(queryTokenResponse.status, 401, "the long-lived token must not authorize through a URL query");
@@ -62,6 +66,15 @@ test("local Agent identity and one-use SSE tickets enforce version, origin, and 
     const replayTicket = await issueTicket(baseUrl, token, "single-use-client");
     const firstUse = await getEvents(baseUrl, replayTicket, "single-use-client", origin);
     assert.equal(firstUse.status, 200);
+    const snapshot={hasCanvas:true,projectId:"v3-maintained-agent-fixture",nodes:[{id:"fixture-node",type:"text",position:{x:0,y:0},width:100,height:100,metadata:{content:"fixture"}}],connections:[],selectedNodeIds:[]};
+    const posted=await fetch(`${baseUrl}/canvas/state?clientId=single-use-client`,{method:"POST",headers:{"content-type":"application/json",origin,"x-canvas-agent-token":token},body:JSON.stringify(snapshot)});
+    assert.equal(posted.status,200);
+    const tool=await fetch(`${baseUrl}/api/tools`,{method:"POST",headers:{"content-type":"application/json","x-canvas-agent-token":token},body:JSON.stringify({name:"canvas_get_state",input:{}})});
+    assert.equal(tool.status,200);
+    const actual=await tool.json() as {result:{hasCanvas?:boolean;projectId?:string;nodes?:Array<{id:string}>}};
+    assert.equal(actual.result.hasCanvas,true);
+    assert.equal(actual.result.projectId,snapshot.projectId);
+    assert.equal(actual.result.nodes?.[0].id,"fixture-node");
     await firstUse.body?.cancel();
     const secondUse = await getEvents(baseUrl, replayTicket, "single-use-client", origin);
     assert.equal(secondUse.status, 401, "a successful SSE ticket must not be reusable");

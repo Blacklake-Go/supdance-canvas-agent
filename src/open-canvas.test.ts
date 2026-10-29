@@ -126,7 +126,7 @@ async function runOpen(url: string) {
                 "--no-browser",
             ], {
                 cwd: packageRoot,
-                env: { ...process.env, HOME: home, USERPROFILE: home },
+                env: { ...process.env, SUPDANCE_CANVAS_CONFIG_DIR: configDir },
                 stdio: ["ignore", "ignore", "pipe"],
             });
             let stderr = "";

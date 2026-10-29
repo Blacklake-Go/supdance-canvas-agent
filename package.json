@@ -1,6 +1,6 @@
 {
   "name": "@supdance/canvas-agent",
-  "version": "0.1.8",
+  "version": "0.1.9-v3.1",
   "license": "MIT",
   "description": "Local MCP and browser bridge for SupDance Canvas",
   "repository": {
@@ -25,7 +25,7 @@
     "prepare": "npm run build",
     "dev": "tsx src/index.ts",
     "debug": "tsx src/index.ts --debug",
-    "test": "tsx --test src/config.test.ts src/open-canvas.test.ts src/server/http.acceptance.test.ts src/server/http.workbuddy.test.ts src/server/mcp.workbuddy.test.ts src/canvas/operations.test.ts src/canvas/session.test.ts src/agent/codex-client.test.ts src/agent/codex-history.test.ts src/agent/message-metadata.test.ts src/skills/store.test.ts src/utils/agent-runtime.test.ts",
+    "test": "tsx --test src/config.test.ts src/cli.test.ts src/open-canvas.test.ts src/server/http.acceptance.test.ts src/server/http.workbuddy.test.ts src/server/mcp.workbuddy.test.ts src/canvas/operations.test.ts src/canvas/session.test.ts src/agent/codex-client.test.ts src/agent/codex-history.test.ts src/agent/message-metadata.test.ts src/skills/store.test.ts src/utils/agent-runtime.test.ts",
     "check:workbuddy-package": "node scripts/check-workbuddy-package.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
